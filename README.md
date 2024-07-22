@@ -49,14 +49,6 @@ This command will generate an ebuild for the `symfony/console` package, place it
 
 ## Development
 
-### Running Tests
-
-For developers working on Composer Ebuild Generator, tests can be run using pytest:
-
-```bash
-poetry run pytest
-```
-
 ### Code Formatting and Linting
 
 We use Black, isort, and Flake8 for code formatting and linting:
