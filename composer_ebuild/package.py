@@ -550,7 +550,7 @@ class ComposerPackage:
                 if 'instance' in dep_info and hasattr(dep_info['instance'], 'get_install_path'):
                     install_path = dep_info['instance'].get_install_path()
                     dependency_autoloads.append(
-                        f"'${{VENDOR_DIR}}{install_path.replace('/usr/share/php', '')}/autoload.php'"
+                        f"\"${{VENDOR_DIR}}{install_path.replace('/usr/share/php', '')}/autoload.php\""
                     )
 
             if dependency_autoloads:
@@ -657,7 +657,7 @@ class ComposerPackage:
             .replace('{{src_uri}}', src_uri + ' -> ${P}.tar.gz') \
             .replace('{{license}}', ' '.join(self.licenses).strip() or 'Unknown') \
             .replace('{{dependencies}}', dependencies_string) \
-            .replace('{{insinto}}', f'insinto \'{install_path}\'') \
+            .replace('{{insinto}}', f'insinto "{install_path}"') \
             .replace('{{doins}}', doins) \
             .replace('{{src_prepare}}', self.get_src_prepare()) \
             .replace('{{workdir}}', self.work_dir)
