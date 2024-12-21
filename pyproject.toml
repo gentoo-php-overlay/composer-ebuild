@@ -1,41 +1,49 @@
-[tool.poetry]
+[build-system]
+requires = ["setuptools>=70", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
 name = "composer-ebuild"
 version = "0.1.0"
-description = "A tool to generate ebuilds for Composer packages"
-authors = ["Your Name <your.email@example.com>"]
-license = "MIT"
+description = "Composer Ebuild Generator aims to create Gentoo Ebuild files from Composer packages."
+authors = [
+    {name = "Your Name", email = "your.email@example.com"}
+]
+license = {text = "MIT"}
 readme = "README.md"
-packages = [{include = "composer_ebuild"}]
+requires-python = ">=3.9"
+dependencies = [
+    "requests>=2.32.3",
+    "PyGithub>=2.4.0"
+]
 
-[tool.poetry.dependencies]
-python = "^3.9"
-requests = "^2.32.3"
+[project.optional-dependencies]
+dev = [
+    "mypy>=1.8.0",
+    "ruff>=0.1.9"
+]
 
-[tool.poetry.group.dev.dependencies]
-flake8 = "^7.0.0"
-mypy = "^1.8.0"
-black = "^23.12.1"
-isort = "^5.12.0"
-
-[build-system]
-requires = ["poetry-core"]
-build-backend = "poetry.core.masonry.api"
-
-[tool.poetry.scripts]
+[project.scripts]
 composer-ebuild = "composer_ebuild.cli:main"
 
-[tool.black]
+[tool.setuptools]
+packages = ["composer_ebuild"]
+
+[tool.ruff]
 line-length = 120
-target-version = ['py39']
+target-version = "py39"
+indent-width = 4
 
-[tool.isort]
-profile = "black"
-line_length = 120
+[tool.ruff.lint]
+# Enable all rules by default, explicitly include I001 to prevent lazy imports
+select = ["ALL", "I001"]
+ignore = ["D211", "D212", "S603"]
 
-[tool.flake8]
-max-line-length = 120
-extend-ignore = "E203, W503"
-max-complexity = 10
+[tool.ruff.format]
+quote-style = "double"
+indent-style = "space"
+skip-magic-trailing-comma = false
+line-ending = "auto"
 
 [tool.pylint.format]
 max-line-length = "100"

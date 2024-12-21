@@ -1,0 +1,1 @@
+"""Composer ebuild generation package."""
