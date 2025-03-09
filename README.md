@@ -36,12 +36,13 @@ composer-ebuild <package_name> [options]
 ### Options:
 
 - `-d, --debug`: Enable debug logging
-- `-o, --output-dir`: Specify the output directory for generated ebuilds (default: current working directory)
-- `-t, --temp-dir`: Override the temporary directory used during the process
 - `--github-token`: GitHub API token for authentication (can also use GITHUB_TOKEN environment variable)
+- `-m, --metadata`: Generate metadata.xml files for packages
+- `-o, --output-dir`: Specify the output directory for generated ebuilds (default: current working directory)
+- `--platform`: Specify PHP platform version (default: 7.4, choices: 7.4, 8.0, 8.1, 8.2, 8.3)
 - `--skip-downgrade`: Skip downgrading dependencies to their lowest stable versions
-- `--version`: Specify a particular version to install (default: latest)
-- `--platform`: Specify PHP platform version (default: 7.4)
+- `-t, --temp-dir`: Override the temporary directory used during the process (default: /tmp/composer-ebuild)
+- `-v, --version`: Specify a particular version to install (default: latest)
 
 By default, the generator will install the lowest stable versions of all dependencies to ensure maximum compatibility. Use `--skip-downgrade` to keep the latest compatible versions instead.
 
@@ -71,7 +72,9 @@ This command will generate an ebuild for the `symfony/console` package, place it
 
 ### Code Formatting and Linting
 
-Usage of lazy imports is discouraged. We use Ruff for code formatting and linting:
+Please avoid lazy imports. 
+
+We use Ruff for code formatting and linting:
 
 ```bash
 # Format code

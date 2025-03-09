@@ -28,6 +28,7 @@ class GeneratorConfig:
 
     debug: bool = False
     github_token: str | None = None
+    metadata: bool = False
     platform: str = "7.4"
     skip_downgrade: bool = False
     version: str = "latest"
@@ -244,7 +245,7 @@ class ComposerEbuildGenerator:
             self._assign_dependencies()
             for name, package in self.packages.items():
                 logger.debug("Creating Ebuild for %s", name)
-                package.create_ebuild(self.output_dir, self.templates_dir)
+                package.create_ebuild(self.output_dir, self.templates_dir, create_metadata=self.config.metadata)
         except (ComposerJsonError, OSError, ValueError) as e:
             error_msg = f"Failed to generate ebuilds: {e}"
             raise EbuildGenerationError(error_msg) from e
@@ -342,11 +343,34 @@ def main() -> None:
     parser.add_argument("package_name", type=str, help="The name of the Composer package (vendor/package)")
     parser.add_argument("-d", "--debug", action="store_true", help="Enable debug logging")
     parser.add_argument(
+        "--github-token",
+        type=str,
+        help="GitHub API token for authentication (can also use GITHUB_TOKEN env variable)",
+    )
+    parser.add_argument(
+        "-m",
+        "--metadata",
+        action="store_true",
+        help="Generate metadata.xml files for packages",
+    )
+    parser.add_argument(
         "-o",
         "--output-dir",
         type=str,
         default=str(Path.cwd()),
         help="The directory to store the generated ebuild files",
+    )
+    parser.add_argument(
+        "--platform",
+        type=str,
+        default="7.4",
+        choices=["7.4", "8.0", "8.1", "8.2", "8.3"],
+        help="PHP platform version (default: 7.4)",
+    )
+    parser.add_argument(
+        "--skip-downgrade",
+        action="store_true",
+        help="Skip downgrading dependencies to their lowest stable versions",
     )
     parser.add_argument(
         "-t",
@@ -356,27 +380,11 @@ def main() -> None:
         help="Override the temporary directory (default: /tmp/composer-ebuild)",
     )
     parser.add_argument(
-        "--github-token",
-        type=str,
-        help="GitHub API token for authentication (can also use GITHUB_TOKEN env variable)",
-    )
-    parser.add_argument(
-        "--skip-downgrade",
-        action="store_true",
-        help="Skip downgrading dependencies to their lowest stable versions",
-    )
-    parser.add_argument(
+        "-v",
         "--version",
         type=str,
         default="latest",
         help="Specific version to install (default: latest)",
-    )
-    parser.add_argument(
-        "--platform",
-        type=str,
-        default="7.4",
-        choices=["7.4", "8.0", "8.1", "8.2", "8.3"],
-        help="PHP platform version (default: 7.4)",
     )
     args = parser.parse_args()
 
@@ -388,6 +396,7 @@ def main() -> None:
     config = GeneratorConfig(
         debug=args.debug,
         github_token=github_token,
+        metadata=args.metadata,
         skip_downgrade=args.skip_downgrade,
         version=args.version,
         platform=args.platform,

@@ -94,13 +94,14 @@ class ComposerPackage:
             # The exception will handle printing and exiting
             pass
 
-    def create_ebuild(self, output_dir: str, templates_dir: Path) -> None:
+    def create_ebuild(self, output_dir: str, templates_dir: Path, *, create_metadata: bool = False) -> None:
         """
         Create an ebuild file for the package.
 
         Args:
             output_dir: The directory to place the generated ebuild file
             templates_dir: Directory containing the ebuild templates
+            create_metadata: Whether to create metadata.xml files
 
         """
         self.output_dir = output_dir
@@ -154,15 +155,12 @@ class ComposerPackage:
 
         logger.debug("Created ebuild at %s", ebuild_output_file)
 
-        # Check for and copy files directory if it exists
-        files_dir = template_path / "files"
-        if files_dir.exists():
-            logger.debug("Found files directory at %s", files_dir)
-            package_files_dir = package_dir / "files"
-            if package_files_dir.exists():
-                shutil.rmtree(package_files_dir)
-            shutil.copytree(files_dir, package_files_dir)
-            logger.debug("Copied files directory to %s", package_files_dir)
+        # Create metadata.xml file if requested
+        if create_metadata:
+            self._create_metadata_xml(package_dir)
+
+        # Copy files directory if it exists
+        self._copy_files_directory(template_path, package_dir)
 
     def add_dependency_instance(self, dep_name: str, dep_instance: ComposerPackage) -> None:
         """
@@ -824,6 +822,35 @@ class ComposerPackage:
             return dependencies
         return None
 
+    def _create_metadata_xml(self, package_dir: Path) -> None:
+        """
+        Create a metadata.xml file for the package.
+
+        Args:
+            package_dir: The directory where the metadata.xml file will be created
+
+        """
+        logger.debug("Creating metadata.xml for %s", self.name)
+
+        metadata_content = "<?xml version='1.0' encoding='utf-8'?>\n"
+        metadata_content += '<!DOCTYPE pkgmetadata SYSTEM "https://www.gentoo.org/dtd/metadata.dtd">\n'
+        metadata_content += "<pkgmetadata>\n"
+
+        # Add upstream information if available
+        if self.repository_url and "github.com" in self.repository_url:
+            repo_name = self.repository_url.split("github.com/")[-1]
+            metadata_content += "  <upstream>\n"
+            metadata_content += f'    <remote-id type="github">{repo_name}</remote-id>\n'
+            metadata_content += "  </upstream>\n"
+
+        metadata_content += "</pkgmetadata>\n"
+
+        metadata_file = package_dir / "metadata.xml"
+        with metadata_file.open("w") as f:
+            f.write(metadata_content)
+
+        logger.debug("Created metadata.xml at %s", metadata_file)
+
     def _get_workdir(self) -> str:
         """
         Get the WORKDIR string for the ebuild.
@@ -859,3 +886,20 @@ class ComposerPackage:
 
         logger.debug("Final WORKDIR string: %s", work_dir)
         return "${WORKDIR}/" + work_dir
+    def _copy_files_directory(self, template_path: Path, package_dir: Path) -> None:
+        """
+        Copy the files directory from templates to the package directory.
+
+        Args:
+            template_path: Path to the template directory
+            package_dir: Path to the package directory where files will be copied
+
+        """
+        files_dir = template_path / "files"
+        if files_dir.exists():
+            logger.debug("Found files directory at %s", files_dir)
+            package_files_dir = package_dir / "files"
+            if package_files_dir.exists():
+                shutil.rmtree(package_files_dir)
+            shutil.copytree(files_dir, package_files_dir)
+            logger.debug("Copied files directory to %s", package_files_dir)
