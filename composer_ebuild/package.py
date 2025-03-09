@@ -589,7 +589,7 @@ class ComposerPackage:
 
         """
         src_prepare = "default\n\n"
-        src_prepare += "mkdir vendor || die\n\n"
+        src_prepare += "\tmkdir vendor || die\n\n"
         src_prepare += "\tphpab \\\n"
         src_prepare += "\t\t--output vendor/autoload.php \\\n"
         src_prepare += '\t\t--template "${FILESDIR}"/autoload.php.tpl \\\n'
@@ -810,7 +810,6 @@ class ComposerPackage:
                 )
 
         if dependency_autoloads:
-            dependencies += "\n\n"
             dependencies += '\n\tVENDOR_DIR="${EPREFIX}/usr/share/php"'
             dependencies += f'\n\tcat >> {autoload_file} <<EOF || die "failed to extend autoload.php"'
             dependencies += "\n\n// Dependencies"
