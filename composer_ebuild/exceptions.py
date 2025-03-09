@@ -24,13 +24,7 @@ class EQueryNotFoundError(OSError):
 
 class ComposerJsonError(Exception):
 
-    """
-    Exception raised for errors in the composer.json file.
-
-    Attributes:
-        message (str): Explanation of the error.
-
-    """
+    """Exception raised for errors in the composer.json file."""
 
     NO_EXTRACTED_DIR = "No extracted directory found"
 
@@ -44,19 +38,13 @@ class ComposerJsonError(Exception):
         """
         self.message = message
         super().__init__(self.message)
-        logger.exception(self.message)
+        print(f"Error: {self.message}")  # noqa: T201
         sys.exit(1)
 
 
 class ComposerPackageInstallError(Exception):
 
-    """
-    Exception raised for errors during the installation of a Composer package.
-
-    Attributes:
-        message (str): Explanation of the error.
-
-    """
+    """Exception raised for errors during the installation of a Composer package."""
 
     def __init__(self, message: str) -> None:
         """
@@ -72,13 +60,7 @@ class ComposerPackageInstallError(Exception):
 
 class EbuildGenerationError(Exception):
 
-    """
-    Exception raised for errors during the ebuild generation process.
-
-    Attributes:
-        message (str): Explanation of the error.
-
-    """
+    """Exception raised for errors during the ebuild generation process."""
 
     def __init__(self, message: str) -> None:
         """

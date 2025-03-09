@@ -7,7 +7,11 @@ def configure_logging(*, debug: bool = False) -> None:
     """
     Configure logging for the entire application.
 
-    :param debug: If True, set log level to DEBUG, otherwise INFO
+    Sets up the root logger with appropriate log level and formatter.
+
+    Args:
+        debug: If True, set log level to DEBUG, otherwise INFO
+
     """
     log_level = logging.DEBUG if debug else logging.INFO
 

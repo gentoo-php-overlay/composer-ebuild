@@ -1,4 +1,3 @@
-setuptools~=68.2.2
-argparse~=1.4.0
+setuptools~=75.8.0
 requests~=2.32.3
-PyGithub~=2.4.0
+pygithub~=2.5.0

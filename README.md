@@ -59,10 +59,10 @@ The GitHub token can be provided in two ways:
 ```bash
 # Using environment variable
 export GITHUB_TOKEN=your_github_token
-composer-ebuild symfony/console -o ./ebuilds -d
+composer-ebuild symfony/console -o ./ebuilds
 
 # Or using command line argument
-composer-ebuild symfony/console -o ./ebuilds -d --github-token your_github_token
+composer-ebuild symfony/console -o ./ebuilds --github-token=your_github_token
 ```
 
 This command will generate an ebuild for the `symfony/console` package, place it in the `./ebuilds` directory, and run in debug mode.
