@@ -39,7 +39,6 @@ class ComposerEbuildGenerator:
     """A class to generate ebuilds for a given Composer package."""
 
     config: GeneratorConfig
-    debug: bool
     github_token: str
     output_dir: str
     package_name: str
@@ -90,12 +89,8 @@ class ComposerEbuildGenerator:
                 self._update_composer_dependencies()
             self._gather_package_information()
             self._generate_ebuilds()
-        except ComposerPackageInstallError:
-            logger.exception("Failed to install Composer package '%s'", self.package_name)
-        except ComposerJsonError:
-            logger.exception("Error processing Composer JSON for '%s'", self.package_name)
-        except EbuildGenerationError:
-            logger.exception("Failed to generate ebuilds for '%s'", self.package_name)
+        except (ComposerPackageInstallError, ComposerJsonError, EbuildGenerationError):
+            logger.exception("Error processing '%s'", self.package_name)
         except Exception:
             logger.exception("Unexpected error occurred while processing '%s'", self.package_name)
         finally:
@@ -125,7 +120,6 @@ class ComposerEbuildGenerator:
 
         """
         logger.debug("Installing Composer package: %s", self.package_name)
-        # First install the package
         package_spec = (
             f"{self.package_name}:{self.version}"
             if self.version != "latest"
@@ -135,11 +129,12 @@ class ComposerEbuildGenerator:
             "/usr/bin/composer",
             "require",
             package_spec,
+            "--no-interaction",
             "--working-dir",
             self.temp_dir,
         ]
 
-        return_code, _, _ = run_subprocess(command)
+        return_code, _, _ = run_subprocess(command, log_output=self.config.debug)
         install_dir = Path(self.temp_dir) / "vendor" / self.package_name.replace("/", os.sep)
 
         if return_code != 0 or not install_dir.is_dir():
@@ -152,6 +147,7 @@ class ComposerEbuildGenerator:
             "/usr/bin/composer",
             "show",
             self.package_name,
+            "--no-interaction",
             "--format=json",
             "--working-dir",
             self.temp_dir,
@@ -193,6 +189,7 @@ class ComposerEbuildGenerator:
         command = [
             "/usr/bin/composer",
             "update",
+            "--no-interaction",
             "--with-dependencies",
             "--prefer-stable",
             "--working-dir",

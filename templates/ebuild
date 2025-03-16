@@ -16,14 +16,13 @@ KEYWORDS="~amd64 ~arm ~arm64 ~x86"
 BDEPEND="dev-php/theseer-Autoload"
 
 RDEPEND="
-	{{dependencies}}
+{{dependencies}}
 "
-
+{{patches}}
 src_prepare() {
-	{{src_prepare}}
+{{src_prepare}}
 }
 
 src_install() {
-	{{insinto}}
-	{{doins}}
+{{src_install}}
 }

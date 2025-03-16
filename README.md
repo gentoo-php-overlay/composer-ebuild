@@ -3,6 +3,9 @@
 ## Overview
 
 Composer Ebuild Generator aims to create Gentoo Ebuild files from Composer packages.
+It is mostly being used to manage the package in the unofficial PHP overlay.
+
+This tool should work for a lot of packages. But it should be noted that Composer developers generally discourage any package manager besides Composer. Due to the quirks in Composer and some weird ideas of packaging within the PHP landscape, there will be a number of packages not compatible with this tool.
 
 ## Features
 
