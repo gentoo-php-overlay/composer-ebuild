@@ -176,6 +176,22 @@ def get_package_name(name: str) -> str:
     return package if vendor in {package, "composer"} else f"{vendor}-{package}"
 
 
+def get_package_dir(name: str) -> str:
+    """
+    Get the full package directory path for a package name.
+
+    Args:
+        name: The package name (can be either full vendor/package or standardized name)
+
+    Returns:
+        The full package directory path (dev-php/PACKAGE_NAME)
+
+    """
+    logger.debug("Getting package directory for: %s", name)
+    package_name = get_package_name(name) if "/" in name else name
+    return f"dev-php/{package_name}"
+
+
 def get_php_useflags() -> list[str]:
     """
     Get the USE flags for dev-lang/php by calling 'equery --no-color u dev-lang/php'.

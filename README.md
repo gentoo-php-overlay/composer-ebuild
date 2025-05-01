@@ -38,14 +38,17 @@ composer-ebuild <package_name> [options]
 
 ### Options:
 
-- `-d, --debug`: Enable debug logging
-- `--github-token`: GitHub API token for authentication (can also use GITHUB_TOKEN environment variable)
-- `-m, --metadata`: Generate metadata.xml files for packages
-- `-o, --output-dir`: Specify the output directory for generated ebuilds (default: current working directory)
-- `--platform`: Specify PHP platform version (default: 7.4, choices: 7.4, 8.0, 8.1, 8.2, 8.3)
-- `--skip-downgrade`: Skip downgrading dependencies to their lowest stable versions
-- `-t, --temp-dir`: Override the temporary directory used during the process (default: /tmp/composer-ebuild)
-- `-v, --version`: Specify a particular version to install (default: latest)
+| Option | Description |
+|--------|-------------|
+| `-d, --debug` | Enable debug logging |
+| `--github-token` | GitHub API token for authentication (can also use GITHUB_TOKEN environment variable) |
+| `-k, --keywords` | Generate package.accept_keywords file for all packages |
+| `-m, --metadata` | Generate metadata.xml files for packages |
+| `-o, --output-dir` | Specify the output directory for generated ebuilds (default: current working directory) |
+| `-p, --platform` | Specify PHP platform version (default: 8.1, choices: 7.4, 8.0, 8.1, 8.2, 8.3, 8.4) |
+| `--skip-downgrade` | Skip downgrading dependencies to their lowest stable versions |
+| `-t, --temp-dir` | Override the temporary directory used during the process (default: /tmp/composer-ebuild) |
+| `-v, --version` | Specify a particular version to install (default: latest) |
 
 By default, the generator will install the lowest stable versions of all dependencies to ensure maximum compatibility. Use `--skip-downgrade` to keep the latest compatible versions instead.
 

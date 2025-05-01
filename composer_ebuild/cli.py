@@ -14,11 +14,12 @@ from pathlib import Path
 from composer_ebuild.exceptions import ComposerJsonError, ComposerPackageInstallError, EbuildGenerationError
 from composer_ebuild.logger import configure_logging
 from composer_ebuild.package import ComposerPackage
-from composer_ebuild.utils import is_running_in_ide, run_subprocess
+from composer_ebuild.utils import get_package_dir, is_running_in_ide, run_subprocess
 
 logger = logging.getLogger(__name__)
 
 DEFAULT_TEMP_DIR = str(Path(tempfile.gettempdir()) / "composer-ebuild")
+PLATFORM = "8.1"
 
 
 @dataclass
@@ -28,8 +29,9 @@ class GeneratorConfig:
 
     debug: bool = False
     github_token: str | None = None
+    keywords: bool = False
     metadata: bool = False
-    platform: str = "7.4"
+    platform: str = PLATFORM
     skip_downgrade: bool = False
     version: str = "latest"
 
@@ -89,6 +91,9 @@ class ComposerEbuildGenerator:
                 self._update_composer_dependencies()
             self._gather_package_information()
             self._generate_ebuilds()
+
+            if self.config.keywords:
+                self._generate_keywords()
         except (ComposerPackageInstallError, ComposerJsonError, EbuildGenerationError):
             logger.exception("Error processing '%s'", self.package_name)
         except Exception:
@@ -104,8 +109,7 @@ class ComposerEbuildGenerator:
             shutil.rmtree(self.temp_dir)
         if Path(self.output_dir).exists():
             logger.debug("Deleting contents of output directory: %s", self.output_dir)
-            for filename in os.listdir(self.output_dir):
-                file_path = Path(self.output_dir) / filename
+            for file_path in Path(self.output_dir).iterdir():
                 if file_path.is_file() or file_path.is_symlink():
                     file_path.unlink()
                 elif file_path.is_dir():
@@ -247,6 +251,36 @@ class ComposerEbuildGenerator:
             error_msg = f"Failed to generate ebuilds: {e}"
             raise EbuildGenerationError(error_msg) from e
 
+    def _generate_keywords(self) -> None:
+        """
+        Generate a package.accept_keywords file for all packages.
+
+        This method creates a file at self.output_dir/package.accept_keywords/composer
+        containing a sorted list of package directories.
+        """
+        logger.debug("Generating package.accept_keywords file")
+
+        # Create the directory if it doesn't exist
+        keywords_dir = Path(self.output_dir) / "package.accept_keywords"
+        keywords_dir.mkdir(parents=True, exist_ok=True)
+
+        # Get the list of package names
+        package_names = [get_package_dir(name) for name in self.packages]
+
+        # Add theseer-Autoload dependency
+        package_names.append("dev-php/theseer-Autoload")
+
+        # Sort the list
+        package_names.sort()
+
+        # Write the file
+        keywords_file = keywords_dir / "composer"
+        with keywords_file.open("w") as f:
+            for package_name in package_names:
+                f.write(f"{package_name}\n")
+
+        logger.debug("Created package.accept_keywords file at %s", keywords_file)
+
     def _assign_dependencies(self) -> None:
         """Assign dependencies and their instances to each package."""
         logger.debug("Assigning dependency instances to packages")
@@ -345,6 +379,12 @@ def main() -> None:
         help="GitHub API token for authentication (can also use GITHUB_TOKEN env variable)",
     )
     parser.add_argument(
+        "-k",
+        "--keywords",
+        action="store_true",
+        help="Generate package.accept_keywords file for all packages",
+    )
+    parser.add_argument(
         "-m",
         "--metadata",
         action="store_true",
@@ -358,11 +398,12 @@ def main() -> None:
         help="The directory to store the generated ebuild files",
     )
     parser.add_argument(
+        "-p",
         "--platform",
         type=str,
-        default="7.4",
-        choices=["7.4", "8.0", "8.1", "8.2", "8.3"],
-        help="PHP platform version (default: 7.4)",
+        default=PLATFORM,
+        choices=["7.4", "8.0", "8.1", "8.2", "8.3", "8.4"],
+        help=f"PHP platform version (default: {PLATFORM})",
     )
     parser.add_argument(
         "--skip-downgrade",
@@ -393,6 +434,7 @@ def main() -> None:
     config = GeneratorConfig(
         debug=args.debug,
         github_token=github_token,
+        keywords=args.keywords,
         metadata=args.metadata,
         skip_downgrade=args.skip_downgrade,
         version=args.version,

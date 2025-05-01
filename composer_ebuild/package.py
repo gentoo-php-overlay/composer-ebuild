@@ -24,6 +24,7 @@ from composer_ebuild.utils import (
     copy_files_directory,
     filter_subdirectories,
     format_path,
+    get_package_dir,
     get_package_name,
     get_php_useflags,
     run_subprocess,
@@ -152,7 +153,7 @@ class ComposerPackage:
 
         package_name = get_package_name(self.name)
         ebuild_filename = f"{package_name}-{self.version.lstrip('v')}.ebuild"
-        package_dir = Path(self.output_dir) / "dev-php" / package_name
+        package_dir = Path(f"{self.output_dir}/{get_package_dir(package_name)}")
         package_dir.mkdir(parents=True, exist_ok=True)
         ebuild_output_file = package_dir / ebuild_filename
 
@@ -205,7 +206,7 @@ class ComposerPackage:
             and not sub_dep_name.startswith("ext-")
         ):
             self.dependencies[sub_dep_name] = {
-                "ebuild": f"dev-php/{get_package_name(sub_dep_name)}",
+                "ebuild": get_package_dir(sub_dep_name),
                 "instance": sub_dep_instance,
                 "type": "sub",
             }
@@ -487,8 +488,7 @@ class ComposerPackage:
         """
         for dep, _version_req in sorted(self.requires.items()):
             if dep.lower() != "php" and not dep.lower().startswith("ext-"):
-                package_name = get_package_name(dep)
-                self.dependencies[dep] = {"ebuild": f"dev-php/{package_name}", "type": "main"}
+                self.dependencies[dep] = {"ebuild": get_package_dir(dep), "type": "main"}
 
     def _process_main_dependencies(self) -> None:
         """
@@ -581,21 +581,19 @@ class ComposerPackage:
 
         """
         logger.debug("Processing root directory")
-        for item in os.listdir(self.temp_install_dir):
+        for item_path in Path(self.temp_install_dir).iterdir():
             # Skip hidden directories and files (starting with .)
-            if item.startswith("."):
-                logger.debug("Skipping hidden item: %s", item)
+            if item_path.name.startswith("."):
+                logger.debug("Skipping hidden item: %s", item_path.name)
                 continue
-
-            item_path = Path(self.temp_install_dir) / item
-            if item_path.is_dir() and item not in self.autoload["directories"]:
-                add_item_to_set(item, doins, "directory", "root")
-            elif item.endswith(".php") and item not in self.autoload["files"]:
-                add_item_to_set(item, php_files, "PHP file", "root")
-            elif item.upper() == "LICENSE":
+            if item_path.is_dir() and item_path.name not in self.autoload["directories"]:
+                add_item_to_set(item_path.name, doins, "directory", "root")
+            elif item_path.name.endswith(".php") and item_path.name not in self.autoload["files"]:
+                add_item_to_set(item_path.name, php_files, "PHP file", "root")
+            elif item_path.name.upper() == "LICENSE":
                 # Composer expects the LICENSE file to be there, and the
                 # easiest thing to do is to give it what it wants.
-                add_item_to_set(item, doins, "license file", "root")
+                add_item_to_set(item_path.name, doins, "license file", "root")
 
     def _handle_composer_package(self) -> tuple[str, str]:
         """
@@ -884,7 +882,7 @@ class ComposerPackage:
 
         # Get the name of the extracted directory
         package_path = Path(package_dir)
-        extracted_dirs = [d for d in os.listdir(package_dir) if (package_path / d).is_dir()]
+        extracted_dirs = [d.name for d in package_path.iterdir() if d.is_dir()]
         if not extracted_dirs:
             raise ComposerJsonError(ComposerJsonError.NO_EXTRACTED_DIR)
 

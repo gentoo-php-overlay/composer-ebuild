@@ -13,9 +13,9 @@ license = {text = "MIT"}
 readme = "README.md"
 requires-python = ">=3.9"
 dependencies = [
-    "setuptools>=75.8.0",
+    "setuptools>=78.1.0",
     "packaging>=24.2",
-    "pygithub>=2.5.0",
+    "pygithub>=2.6.1",
     "requests>=2.32.3"
 ]
 
