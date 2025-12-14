@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import logging
 import os
+import re
 import shutil
 import subprocess
 import sys
@@ -53,21 +54,19 @@ def compare_versions(version1: str, version2: str) -> int:
     return 0 if v1 == v2 else (1 if v1 > v2 else -1)
 
 
-def copy_files_directory(template_path: Path, package_dir: Path) -> None:
+def copy_files_directory(template_path: Path, package_dir: Path, package_name: str) -> None:
     """
     Copy the files directory from templates to the package directory.
 
     Looks for files in templates/files/{package_name} where {package_name} is the
-    last part of the package_dir path.
+    standardized package name (e.g., 'composer' for composer/composer, 'theseer-autoload' for theseer/autoload).
 
     Args:
         template_path: Path to the template directory
         package_dir: Path to the package directory where files will be copied
+        package_name: Standardized package name from get_package_name()
 
     """
-    # Get the package name from the package_dir
-    package_name = package_dir.name
-
     # Check for files in templates/files/{package_name}
     template_files_dir = Path(template_path) / "files" / package_name
 
@@ -116,11 +115,6 @@ def filter_subdirectories(doins_set: set[str]) -> set[str]:
     filtered_set = set()
 
     for item in doins_set:
-        # Always keep items ending with /*
-        if item.endswith("/*"):
-            filtered_set.add(item)
-            continue
-
         # Check if any base directory of this item is already in the list
         parts = item.split("/")
         is_subdirectory = False
@@ -140,7 +134,7 @@ def filter_subdirectories(doins_set: set[str]) -> set[str]:
 
 def format_path(path: str) -> str:
     """
-    Format the path for doins command, handling the 'src' directory case.
+    Format the path for doins command.
 
     Args:
         path: The original path
@@ -150,11 +144,7 @@ def format_path(path: str) -> str:
 
     """
     # Strip trailing slashes
-    path = path.rstrip("/")
-
-    if path == "src":
-        return "src/*"
-    return f"{path}"
+    return path.rstrip("/")
 
 
 def get_package_name(name: str) -> str:
@@ -207,11 +197,11 @@ def get_php_useflags() -> list[str]:
     try:
         equery_output = execute_equery_command()
         return parse_php_useflags(equery_output)
-    except subprocess.CalledProcessError as e:
-        logger.debug("Error running equery: %s", e)
+    except subprocess.CalledProcessError:
+        logger.exception("Error running equery")
         return []
-    except OSError as e:
-        logger.debug("System or I/O error: %s", e)
+    except OSError:
+        logger.exception("System or I/O error")
         return []
 
 
@@ -317,14 +307,73 @@ def run_subprocess(
         if log_output and stdout:
             logger.debug("Command output: %s", stdout)
         if stderr and process.returncode != 0:
-            logger.debug("Command error: %s", stderr)
+            logger.error("Command failed: %s", stderr)
     except subprocess.CalledProcessError as e:
-        logger.debug("Command failed with return code %d: %s", e.returncode, e)
+        logger.exception("Command failed with return code %d", e.returncode)
         if check:
             raise
         return e.returncode, e.stdout, e.stderr
     else:
         return process.returncode, stdout, stderr
+
+
+def scan_classmap_directories(temp_install_dir: str, directories: list[str]) -> dict[str, str]:
+    """
+    Scan classmap directories and extract class/interface/trait names with their file paths.
+
+    Args:
+        temp_install_dir: The temporary installation directory path
+        directories: List of directories to scan for PHP classes
+
+    Returns:
+        Dictionary mapping fully qualified class names to their relative file paths
+
+    """
+    logger.debug("Scanning classmap directories for class definitions")
+    classmap = {}
+
+    for directory in directories:
+        dir_path = Path(temp_install_dir) / directory
+        if not dir_path.exists():
+            logger.warning("Classmap directory does not exist: %s", dir_path)
+            continue
+
+        # Recursively find all PHP files
+        for php_file in dir_path.rglob("*.php"):
+            logger.debug("Scanning file: %s", php_file)
+            try:
+                with php_file.open(encoding="utf-8") as f:
+                    content = f.read()
+
+                # Extract namespace - support both bracketed and unbracketed syntax
+                # Unbracketed: namespace Foo\Bar;
+                # Bracketed: namespace Foo\Bar { ... }
+                namespace = ""
+                namespace_match = re.search(r"^\s*namespace\s+([\w\\]+)\s*[;{]", content, re.MULTILINE)
+                if namespace_match:
+                    namespace = namespace_match.group(1)
+
+                # Extract class, interface, and trait names
+                # Match class/interface/trait declarations
+                pattern = r"^\s*(?:abstract\s+|final\s+)?(class|interface|trait)\s+(\w+)"
+                matches = re.finditer(pattern, content, re.MULTILINE)
+
+                for match in matches:
+                    class_name = match.group(2)
+                    full_class_name = f"{namespace}\\{class_name}" if namespace else class_name
+
+                    # Get relative path from temp_install_dir
+                    relative_path = php_file.relative_to(Path(temp_install_dir))
+
+                    # Store with original casing preserved
+                    classmap[full_class_name] = f"/{relative_path}"
+                    logger.debug("Found class: %s -> %s", full_class_name, relative_path)
+
+            except (OSError, UnicodeDecodeError) as e:
+                logger.warning("Failed to parse file %s: %s", php_file, e)
+
+    logger.debug("Found %d classes in classmap", len(classmap))
+    return classmap
 
 
 def validate_equery_args() -> tuple[str, list[str]]:

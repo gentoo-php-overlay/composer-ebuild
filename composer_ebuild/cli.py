@@ -13,7 +13,7 @@ from pathlib import Path
 
 from composer_ebuild.exceptions import ComposerJsonError, ComposerPackageInstallError, EbuildGenerationError
 from composer_ebuild.logger import configure_logging
-from composer_ebuild.package import ComposerPackage
+from composer_ebuild.package import ComposerPackage, PackageConfig
 from composer_ebuild.utils import get_package_dir, is_running_in_ide, run_subprocess
 
 logger = logging.getLogger(__name__)
@@ -27,6 +27,7 @@ class GeneratorConfig:
 
     """Configuration for the ComposerEbuildGenerator."""
 
+    cache_dir: str | None = None
     debug: bool = False
     github_token: str | None = None
     keywords: bool = False
@@ -225,18 +226,34 @@ class ComposerEbuildGenerator:
         with Path(composer_lock_path).open() as composer_lock_file:
             composer_lock_data = json.load(composer_lock_file)
 
+        # Create package config
+        package_config = PackageConfig(
+            github_token=self.config.github_token,
+            cache_dir=self.config.cache_dir,
+        )
+
         for package in composer_lock_data.get("packages", []):
             name = package["name"]
             version = package["version"]
             if name != "composer":
                 logger.debug("Gathering information for %s", name)
                 try:
-                    composer_package = ComposerPackage(name, version, self.temp_dir, self.config.github_token)
+                    composer_package = ComposerPackage(
+                        name,
+                        version,
+                        self.temp_dir,
+                        config=package_config,
+                    )
                     self.packages[name] = composer_package
                 except ComposerJsonError as e:
                     logger.warning("Failed to create ComposerPackage for %s: %s", name, str(e))
                     # Create a minimal ComposerPackage object with available information
-                    self.packages[name] = ComposerPackage(name, version, self.temp_dir, self.config.github_token)
+                    self.packages[name] = ComposerPackage(
+                        name,
+                        version,
+                        self.temp_dir,
+                        config=package_config,
+                    )
 
         logger.debug("Gathered information for %d packages", len(self.packages))
 
@@ -267,8 +284,8 @@ class ComposerEbuildGenerator:
         # Get the list of package names
         package_names = [get_package_dir(name) for name in self.packages]
 
-        # Add theseer-Autoload dependency
-        package_names.append("dev-php/theseer-Autoload")
+        # Add theseer-autoload dependency
+        package_names.append("dev-php/theseer-autoload")
 
         # Sort the list
         package_names.sort()
@@ -372,6 +389,11 @@ def main() -> None:
     """Parse arguments and run the ebuild generator."""
     parser = argparse.ArgumentParser(description="Generate ebuilds for a Composer package.")
     parser.add_argument("package_name", type=str, help="The name of the Composer package (vendor/package)")
+    parser.add_argument(
+        "--cache-dir",
+        type=str,
+        help="Directory to cache downloaded packages (mostly used during development)",
+    )
     parser.add_argument("-d", "--debug", action="store_true", help="Enable debug logging")
     parser.add_argument(
         "--github-token",
@@ -432,6 +454,7 @@ def main() -> None:
     configure_logging(debug=args.debug)
     logger.debug("Starting Composer Ebuild Generator")
     config = GeneratorConfig(
+        cache_dir=args.cache_dir,
         debug=args.debug,
         github_token=github_token,
         keywords=args.keywords,

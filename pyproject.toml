@@ -1,5 +1,5 @@
 [build-system]
-requires = ["setuptools>=70", "wheel"]
+requires = ["setuptools>=80", "wheel"]
 build-backend = "setuptools.build_meta"
 
 [project]
@@ -11,18 +11,18 @@ authors = [
 ]
 license = {text = "MIT"}
 readme = "README.md"
-requires-python = ">=3.9"
+requires-python = ">=3.11"
 dependencies = [
-    "setuptools>=78.1.0",
-    "packaging>=24.2",
-    "pygithub>=2.6.1",
-    "requests>=2.32.3"
+    "setuptools>=80",
+    "packaging>=25.0",
+    "pygithub>=2.8.1",
+    "requests>=2.32.5"
 ]
 
 [project.optional-dependencies]
 dev = [
-    "mypy>=1.8.0",
-    "ruff>=0.1.9"
+    "mypy>=1.19.0",
+    "ruff>=0.14.8"
 ]
 
 [project.scripts]
@@ -33,7 +33,7 @@ packages = ["composer_ebuild"]
 
 [tool.ruff]
 line-length = 120
-target-version = "py39"
+target-version = "py311"
 indent-width = 4
 
 [tool.ruff.lint]

@@ -6,9 +6,11 @@ import json
 import logging
 import os
 import re
+import shutil
 import subprocess
 import tempfile
-from datetime import datetime, timezone
+from dataclasses import dataclass
+from datetime import UTC, datetime
 from http import HTTPStatus
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
@@ -18,6 +20,7 @@ from github import Github
 from github.GithubException import GithubException
 
 from composer_ebuild.exceptions import ComposerJsonError
+from composer_ebuild.package_handlers.registry import HandlerRegistry
 from composer_ebuild.utils import (
     add_item_to_set,
     compare_versions,
@@ -28,6 +31,7 @@ from composer_ebuild.utils import (
     get_package_name,
     get_php_useflags,
     run_subprocess,
+    scan_classmap_directories,
 )
 
 if TYPE_CHECKING:
@@ -37,8 +41,18 @@ if TYPE_CHECKING:
 DEFAULT_PHP_MIN_VERSION: str = "7.4"
 EAPI_VERSION: int = 8
 HTTP_FORBIDDEN: int = 403
+MIN_NAMESPACE_PARTS: int = 2
 
 logger = logging.getLogger(__name__)
+
+
+@dataclass
+class PackageConfig:
+
+    """Configuration for ComposerPackage initialization."""
+
+    github_token: str | None = None
+    cache_dir: str | None = None
 
 
 class ComposerPackage:
@@ -47,6 +61,7 @@ class ComposerPackage:
 
     autoload: dict[str, Any]
     bin_files: list[str]
+    cache_dir: str | None
     dependencies: dict
     description: str
     github_repo: Repository | None
@@ -63,10 +78,17 @@ class ComposerPackage:
     src_uri: str | None
     temp_dir: str
     temp_install_dir: str
+    upstream_base_dir: str
     version: str
     work_dir: str
 
-    def __init__(self, name: str, version: str, temp_dir: str, github_token: str | None = None) -> None:
+    def __init__(
+        self,
+        name: str,
+        version: str,
+        temp_dir: str,
+        config: PackageConfig | None = None,
+    ) -> None:
         """
         Initialize the ComposerPackage.
 
@@ -74,15 +96,18 @@ class ComposerPackage:
             name: The name of the Composer package
             version: The version of the Composer package
             temp_dir: The temporary directory where the Composer package is installed
-            github_token: Optional GitHub API token for authentication
+            config: Optional configuration object with github_token and cache_dir
 
         """
+        config = config or PackageConfig()
+
         self.autoload: dict[str, Any] = {}
         self.bin_files: list[str] = []
+        self.cache_dir: str | None = config.cache_dir
         self.dependencies: dict[str, dict[str, Any]] = {}
         self.github_repo: Repository | None = None
         self.github_tag: str | None = None
-        self.github_token: str | None = github_token
+        self.github_token: str | None = config.github_token
         self.licenses: list[str] = []
         self.name = name
         self.php_min_version: str = DEFAULT_PHP_MIN_VERSION
@@ -92,7 +117,9 @@ class ComposerPackage:
         self.src_uri: str | None = None
         self.temp_dir: str = temp_dir
         self.temp_install_dir: str = str(Path(temp_dir) / "vendor" / name.replace("/", os.sep))
+        self.upstream_base_dir: str = ""
         self.version: str = re.sub(r"^v", "", version)
+        self._handler_registry = HandlerRegistry()
 
         logger.debug("Version: %s", self.version)
 
@@ -117,7 +144,7 @@ class ComposerPackage:
         """
         self.output_dir = output_dir
 
-        current_date = datetime.now(tz=timezone.utc).strftime("%Y")
+        current_date = datetime.now(tz=UTC).strftime("%Y")
         # Use the standard template file
         template_file = templates_dir / "ebuild"
 
@@ -130,28 +157,57 @@ class ComposerPackage:
         else:
             src_uri = self.src_uri
 
-        dependencies_string = "\n\t".join(
-            [f"{info['ebuild']}" for dep, info in self.dependencies.items() if info.get("type") == "main"],
-        )
+        # Build RDEPEND string with proper ordering:
+        # 1. dev-lang/php (always first)
+        # 2. Any blockers (if present)
+        # 3. dev-php/fedora-autoloader (for all packages except theseer/autoload)
+        # 4. All other dependencies
+        rdepend_parts = []
+
+        # Add dev-lang/php first (it's already sorted to be first by _sort_dependencies)
+        if "php" in self.dependencies:
+            rdepend_parts.append(self.dependencies["php"]["ebuild"])
+
+        # Add blockers if any exist for this package
+        blockers = self._handler_registry.get_blockers(self.name, self)
+        if blockers:
+            logger.debug("Adding %d blocker(s) for %s", len(blockers), self.name)
+            rdepend_parts.extend(blockers)
+
+        # Add fedora-autoloader (for all packages except theseer/autoload)
+        if self.name != "theseer/autoload":
+            rdepend_parts.append("dev-php/fedora-autoloader")
+
+        # Add all other main dependencies
+        for dep, info in self.dependencies.items():
+            if info.get("type") == "main" and dep != "php":
+                rdepend_parts.append(info["ebuild"])
+
+        rdepend_string = "\n\t".join(rdepend_parts)
+
+        # Get standardized package name for template lookups
+        package_name = get_package_name(self.name)
 
         # Check for patch files
-        package_name = get_package_name(self.name)
         patches_string = self._get_patches_string(templates_dir, package_name)
+
+        # Generate BDEPEND string
+        bdepend_string = self._get_bdepend_string()
 
         ebuild_content = (
             ebuild_template.replace("{{eapi}}", str(EAPI_VERSION))
-            .replace("{{homepage}}", self.repository_url or "https://packagist.org/packages/" + self.name)
+            .replace("{{homepage}}", self.repository_url or f"https://packagist.org/packages/{self.name}")
             .replace("{{description}}", self.description or "No description available")
             .replace("{{src_uri}}", src_uri + " -> ${P}.tar.gz")
             .replace("{{license}}", " ".join(self.licenses).strip() or "Unknown")
-            .replace("{{dependencies}}", "\t" + dependencies_string)
+            .replace("{{rdepend}}", "\t" + rdepend_string)
+            .replace("{{bdepend}}", bdepend_string)
             .replace("{{patches}}", patches_string)
             .replace("{{src_prepare}}", "\t" + self._get_src_prepare())
             .replace("{{src_install}}", "\t" + self._get_src_install())
             .replace("{{workdir}}", self.work_dir)
         )
 
-        package_name = get_package_name(self.name)
         ebuild_filename = f"{package_name}-{self.version.lstrip('v')}.ebuild"
         package_dir = Path(f"{self.output_dir}/{get_package_dir(package_name)}")
         package_dir.mkdir(parents=True, exist_ok=True)
@@ -166,8 +222,8 @@ class ComposerPackage:
         if create_metadata:
             self._create_metadata_xml(package_dir)
 
-        # Copy files directory if it exists
-        copy_files_directory(templates_dir, package_dir)
+        # Copy files directory if it exists - pass the standardized package name
+        copy_files_directory(templates_dir, package_dir, package_name)
 
     def add_dependency_instance(self, dep_name: str, dep_instance: ComposerPackage) -> None:
         """
@@ -216,6 +272,43 @@ class ComposerPackage:
 
         self._sort_dependencies()
 
+    def get_src_dependency_autoloads(self, autoload_file: str = "autoload.php") -> str | None:
+        """
+        Get the dependency_autoload section for src_prepare.
+
+        This is a public method that can be called by package handlers.
+
+        Args:
+            autoload_file: The name of the autoload file to modify
+
+        Returns:
+            String containing dependency autoload information or None if no dependencies
+
+        """
+        # Collect dependency autoloads first
+        dependency_autoloads = []
+        for dep_info in self.dependencies.values():
+            if "instance" in dep_info and hasattr(dep_info["instance"], "install_path"):
+                install_path = dep_info["instance"].install_path
+                dependency_autoloads.append(
+                    f"\"${{VENDOR_DIR}}{install_path.replace('/usr/share/php', '')}/autoload.php\"",
+                )
+
+        # We have no dependencies
+        if not dependency_autoloads:
+            return None
+
+        # Build the dependency string
+        dependencies = '\n\tVENDOR_DIR="${EPREFIX}/usr/share/php"'
+        dependencies += f'\n\tcat >> {autoload_file} <<EOF || die "failed to extend autoload.php"'
+        dependencies += "\n\n// Dependencies"
+        dependencies += "\n\\Fedora\\Autoloader\\Dependencies::required(["
+        dependencies += '\n\t"${VENDOR_DIR}/Fedora/Autoloader/autoload.php",\n\t'
+        dependencies += ",\n\t".join(dependency_autoloads)
+        dependencies += "\n]);"
+        dependencies += "\nEOF"
+        return dependencies
+
     def _load_composer_json(self) -> dict:
         """
         Load and parse the composer.json file.
@@ -257,7 +350,7 @@ class ComposerPackage:
         try:
             command = ["/usr/bin/composer", "show", self.name, "--format=json"]
             logger.debug("Running command in directory %s: %s", self.temp_dir, " ".join(command))
-            _, stdout, stderr = run_subprocess(command, cwd=self.temp_dir, capture_output=True, check=True)
+            _, stdout, _stderr = run_subprocess(command, cwd=self.temp_dir, capture_output=True, check=True)
             composer_show_info = json.loads(stdout)
             logger.debug("Successfully loaded composer show information")
         except subprocess.CalledProcessError as e:
@@ -326,6 +419,80 @@ class ComposerPackage:
         # Download and extract the package
         self._download_and_extract_package()
 
+    def _get_cache_filename(self) -> str:
+        """
+        Generate a cache filename based on the package name and version.
+
+        Returns:
+            The cache filename
+
+        """
+        # Use package name and version for readability
+        safe_name = self.name.replace("/", "_")
+        return f"{safe_name}-{self.version}.tar.gz"
+
+    def _get_cached_package(self) -> Path | None:
+        """
+        Check if the package exists in the cache directory.
+
+        Returns:
+            Path to the cached package if it exists, None otherwise
+
+        """
+        if not self.cache_dir:
+            return None
+
+        cache_path = Path(self.cache_dir)
+        if not cache_path.exists():
+            logger.debug("Cache directory does not exist: %s", cache_path)
+            return None
+
+        cached_file = cache_path / self._get_cache_filename()
+        if cached_file.exists() and cached_file.is_file():
+            logger.debug("Found cached package: %s", cached_file)
+            return cached_file
+
+        logger.debug("Package not found in cache: %s", cached_file)
+        return None
+
+    def _save_to_cache(self, temp_file_path: str) -> None:
+        """
+        Save the downloaded package to the cache directory.
+
+        Args:
+            temp_file_path: Path to the temporary file to cache
+
+        """
+        if not self.cache_dir:
+            return
+
+        cache_path = Path(self.cache_dir)
+        cache_path.mkdir(parents=True, exist_ok=True)
+
+        cached_file = cache_path / self._get_cache_filename()
+        logger.debug("Saving package to cache: %s", cached_file)
+
+        try:
+            shutil.copy2(temp_file_path, cached_file)
+            logger.debug("Successfully cached package: %s", cached_file)
+        except OSError as e:
+            logger.warning("Failed to cache package: %s", e)
+
+    def _check_download_response(self, response: requests.Response) -> None:
+        """
+        Check if the download response is successful.
+
+        Args:
+            response: The HTTP response object
+
+        Raises:
+            ComposerJsonError: If the response status is not OK
+
+        """
+        if response.status_code != HTTPStatus.OK:
+            error_message = f"Failed to download package from {self.src_uri}"
+            raise ComposerJsonError(error_message)
+
     def _download_and_extract_package(self) -> None:
         """
         Download the package to temp_dir and extract it to self.temp_dir + '/package'.
@@ -337,24 +504,59 @@ class ComposerPackage:
 
         """
         logger.debug("Downloading and extracting package")
-        # Create a temporary file to store the downloaded package
-        with tempfile.NamedTemporaryFile(delete=False, suffix=".tar.gz") as temp_file:
-            # Download the package
-            response = requests.get(self.src_uri, timeout=30)
-            if response.status_code != HTTPStatus.OK:
-                error_message = f"Failed to download package from {self.src_uri}"
-                raise ComposerJsonError(error_message)
-            temp_file.write(response.content)
-            temp_file_path = temp_file.name
 
-        # Extract the package
+        # Check if package exists in cache
+        cached_package = self._get_cached_package()
+        if cached_package:
+            logger.debug("Using cached package: %s", cached_package)
+            temp_file_path = str(cached_package)
+            # Extract the package
+            self._extract_package(temp_file_path)
+            return
+
+        # Download the package
+        try:
+            # Create a temporary file to store the downloaded package
+            with tempfile.NamedTemporaryFile(delete=False, suffix=".tar.gz") as temp_file:
+                # Download the package
+                logger.debug("Downloading package from %s", self.src_uri)
+                response = requests.get(self.src_uri, timeout=30)
+                self._check_download_response(response)
+                temp_file.write(response.content)
+                temp_file_path = temp_file.name
+
+            # Save to cache if cache directory is configured
+            self._save_to_cache(temp_file_path)
+
+            # Extract the package
+            self._extract_package(temp_file_path)
+
+            # Clean up the temporary file if not using cache
+            if not cached_package:
+                Path(temp_file_path).unlink()
+
+        except (ComposerJsonError, requests.RequestException) as e:
+            error_msg = f"Failed to download package: {e}"
+            raise ComposerJsonError(error_msg) from e
+
+    def _extract_package(self, archive_path: str) -> None:
+        """
+        Extract a tar.gz archive to the package directory.
+
+        Args:
+            archive_path: Path to the tar.gz archive to extract
+
+        Raises:
+            ComposerJsonError: If extraction fails
+
+        """
         extract_path = Path(self.temp_dir) / "package" / get_package_name(self.name)
         extract_path.mkdir(parents=True, exist_ok=True)
 
         # Use subprocess to run tar command, mimicking "tar xzf FILENAME.tar.gz" behavior
         try:
             return_code, _, stderr = run_subprocess(
-                ["/bin/tar", "xzf", temp_file_path], cwd=str(extract_path), check=True,
+                ["/bin/tar", "xzf", archive_path], cwd=str(extract_path), check=True,
             )
             if return_code != 0:
                 error_msg = f"Failed to extract package. Error: {stderr}"
@@ -363,15 +565,13 @@ class ComposerPackage:
             error_msg = f"Failed to extract package: {e}"
             raise ComposerJsonError(error_msg) from e
 
-        # Clean up the temporary file
-        Path(temp_file_path).unlink()
         logger.debug("Package extracted to %s", extract_path)
 
     def _sort_dependencies(self) -> None:
         """
         Sort dependencies ensuring dev-lang/php is always on top.
 
-        Followed by dev-php/fedora-autoloader, while the rest are sorted alphabetically.
+        The rest are sorted alphabetically.
         """
         logger.debug("Sorting dependencies")
         sorted_deps = {}
@@ -380,17 +580,31 @@ class ComposerPackage:
         if "php" in self.dependencies:
             sorted_deps["php"] = self.dependencies["php"]
 
-        # Add dev-php/fedora-autoloader second
-        if "fedora-autoloader" in self.dependencies:
-            sorted_deps["fedora-autoloader"] = self.dependencies["fedora-autoloader"]
-
         # Sort the rest of the dependencies by their ebuild names
         sorted_deps.update({
             dep: info for dep, info in sorted(self.dependencies.items(), key=lambda x: x[1]["ebuild"])
-            if dep not in ["php", "fedora-autoloader"]
+            if dep != "php"
         })
         self.dependencies = sorted_deps
         logger.debug("Sorted dependencies: %s", self.dependencies)
+
+    def _normalize_autoload_directories(self, directories: str | list[str]) -> list[str]:
+        """
+        Normalize autoload directories to ensure we have a valid list.
+
+        Args:
+            directories: Directory or list of directories from autoload configuration
+
+        Returns:
+            Normalized list of directories, with "." as fallback if empty
+
+        """
+        if isinstance(directories, str):
+            directories = [directories]
+        # Ensure we have at least "." if directories is empty or contains empty strings
+        if not directories or all(not d or d == "" for d in directories):
+            directories = ["."]
+        return directories
 
     def _process_autoload_info(self, autoload_info: dict[str, Any]) -> None:
         """
@@ -415,20 +629,17 @@ class ComposerPackage:
             namespace = next(iter(autoload_info["psr-4"]))
             self.autoload["namespace"] = namespace
             directories = autoload_info["psr-4"][namespace]
-            if isinstance(directories, str):
-                directories = [directories]
-            self.autoload["directories"] = directories
+            self.autoload["directories"] = self._normalize_autoload_directories(directories)
         elif "psr-0" in autoload_info:
             self.autoload["type"] = "psr-0"
             namespace = next(iter(autoload_info["psr-0"]))
             self.autoload["namespace"] = namespace
             directories = autoload_info["psr-0"][namespace]
-            if isinstance(directories, str):
-                directories = [directories]
-            self.autoload["directories"] = directories
+            self.autoload["directories"] = self._normalize_autoload_directories(directories)
         elif "classmap" in autoload_info:
             self.autoload["type"] = "classmap"
-            self.autoload["directories"] = autoload_info["classmap"]
+            directories = autoload_info["classmap"]
+            self.autoload["directories"] = self._normalize_autoload_directories(directories)
 
         if "files" in autoload_info:
             self.autoload["files"] = autoload_info["files"]
@@ -517,9 +728,6 @@ class ComposerPackage:
             php_ebuild += f"[{','.join(sorted(php_use_flags))}]"
         self.dependencies["php"] = {"ebuild": php_ebuild, "type": "main"}
 
-        # Add dev-php/fedora-autoloader
-        self.dependencies["fedora-autoloader"] = {"ebuild": "dev-php/fedora-autoloader", "type": "main"}
-
         self._sort_dependencies()
 
         logger.debug("Processed dependencies: %s", self.dependencies)
@@ -586,6 +794,12 @@ class ComposerPackage:
             if item_path.name.startswith("."):
                 logger.debug("Skipping hidden item: %s", item_path.name)
                 continue
+
+            # Skip bin directories - they will be handled by dobin
+            if item_path.is_dir() and item_path.name == "bin":
+                logger.debug("Skipping bin directory: %s", item_path.name)
+                continue
+
             if item_path.is_dir() and item_path.name not in self.autoload["directories"]:
                 add_item_to_set(item_path.name, doins, "directory", "root")
             elif item_path.name.endswith(".php") and item_path.name not in self.autoload["files"]:
@@ -595,36 +809,69 @@ class ComposerPackage:
                 # easiest thing to do is to give it what it wants.
                 add_item_to_set(item_path.name, doins, "license file", "root")
 
-    def _handle_composer_package(self) -> tuple[str, str]:
+    def _get_psr4_base_directories(self) -> list[str]:
         """
-        Composer does not work well with the defaults. So we need to handle it with this method instead.
+        Get the top-level base directories from PSR-4 mapping.
+
+        For PSR-4 packages, extract only the top-level directory from each path.
+        For example, "src/JsonSchema" becomes "src", "lib" stays "lib".
 
         Returns:
-            Tuple containing (src_prepare, src_install) sections for composer package
+            List of unique top-level base directories
 
         """
-        src_prepare = "default\n\n"
-        src_prepare += "\tmkdir vendor || die\n\n"
-        src_prepare += "\tphpab \\\n"
-        src_prepare += "\t\t--quiet \\\n"
-        src_prepare += "\t\t--output vendor/autoload.php \\\n"
-        src_prepare += '\t\t--template "${FILESDIR}"/autoload.php.tpl \\\n'
-        src_prepare += "\t\t--basedir src \\\n"
-        src_prepare += "\t\tsrc \\\n"
-        src_prepare += "\t\t|| die\n"
+        logger.debug("Extracting PSR-4 base directories")
 
-        dependency_autoloads = self._get_src_dependency_autoloads(autoload_file="vendor/autoload.php")
-        if dependency_autoloads:
-            src_prepare += dependency_autoloads
+        if self.autoload["type"] != "psr-4":
+            logger.debug("Not a PSR-4 package, returning empty list")
+            return []
 
-        # Generate src_install section for composer
-        src_install = 'insinto "/usr/share/composer"\n'
-        src_install += "\tdoins -r LICENSE res src vendor\n\n"
-        src_install += '\texeinto "/usr/share/composer/bin"\n'
-        src_install += '\tdoexe "bin/composer"\n'
-        src_install += '\tdosym "../share/composer/bin/composer" "/usr/bin/composer"'
+        directories = self.autoload.get("directories", [])
+        if not directories:
+            logger.debug("No directories in PSR-4 mapping")
+            return []
 
-        return src_prepare, src_install
+        base_dirs = set()
+        for directory in directories:
+            dir_str = str(directory).rstrip("/")
+
+            # Skip "." as it means current directory
+            if dir_str in {".", ""}:
+                continue
+
+            # Extract the top-level directory (first part before /)
+            top_level = dir_str.split("/")[0]
+            base_dirs.add(top_level)
+            logger.debug("Extracted top-level directory: %s from %s", top_level, dir_str)
+
+        result = sorted(base_dirs)
+        logger.debug("PSR-4 base directories: %s", result)
+        return result
+
+    def _get_upstream_base_dir(self) -> str:
+        """
+        Determine the upstream base directory for PSR-4 packages.
+
+        This inspects the autoload directories and prefers common values like "src" or "lib".
+        """
+        logger.debug("Determining upstream base directory from autoload configuration")
+        directories = [str(directory) for directory in self.autoload.get("directories", [])]
+
+        for preferred in ("src", "lib"):
+            if preferred in directories:
+                logger.debug("Selected preferred upstream base directory: %s", preferred)
+                self.upstream_base_dir = preferred
+                return preferred
+
+        if directories:
+            # Use the first directory, even if it's "."
+            logger.debug("Selected first autoload directory as upstream base directory: %s", directories[0])
+            self.upstream_base_dir = directories[0]
+            return directories[0]
+
+        logger.debug("No autoload directories configured, defaulting upstream base directory to current directory")
+        self.upstream_base_dir = "."
+        return "."
 
     def _handle_psr4_package(self) -> str:
         """
@@ -634,19 +881,18 @@ class ComposerPackage:
             String containing the src_prepare section for PSR-4 packages
 
         """
-        basedir = "src" if "src" in self.autoload["directories"] else "."
-        logger.debug("Package uses PSR-4, including phpab command with basedir: %s", basedir)
+        logger.debug("Package uses PSR-4, including phpab command")
 
         src_prepare = "default\n\n"
         src_prepare += "\tphpab \\\n"
         src_prepare += "\t\t--quiet \\\n"
         src_prepare += "\t\t--output autoload.php \\\n"
         src_prepare += "\t\t--template fedora2 \\\n"
-        src_prepare += f"\t\t--basedir {basedir} \\\n"
-        src_prepare += f"\t\t{basedir} \\\n"
+        src_prepare += "\t\t--basedir . \\\n"
+        src_prepare += "\t\t. \\\n"
         src_prepare += "\t\t|| die"
 
-        dependency_autoloads = self._get_src_dependency_autoloads()
+        dependency_autoloads = self.get_src_dependency_autoloads()
         if dependency_autoloads:
             src_prepare += "\n" + dependency_autoloads
         return src_prepare
@@ -671,13 +917,28 @@ class ComposerPackage:
             src_prepare += self.autoload["namespace"]
             src_prepare += "', __DIR__);\" >> autoload.php\n"
         elif self.autoload["type"] == "classmap":
-            src_prepare += '\n\techo "\\\\Fedora\\\\Autoloader\\\\Autoload::addClassMap(["'
-            src_prepare += " >> autoload.php\n"
-            for directory in self.autoload["directories"]:
-                src_prepare += f'\techo "    "{directory}" => __DIR__ . "/{directory}","'
-                src_prepare += " >> autoload.php\n"
-            src_prepare += '\techo "]);"'
-            src_prepare += " >> autoload.php\n"
+            # Scan directories to build classmap
+            classmap = scan_classmap_directories(self.temp_install_dir, self.autoload["directories"])
+
+            if classmap:
+                src_prepare += '\n\techo "" >> autoload.php\n'
+                src_prepare += '\techo "\\\\Fedora\\\\Autoloader\\\\Autoload::addClassMap(array(" >> autoload.php\n'
+
+                # Sort classmap entries for consistent output (case-insensitive sort)
+                for class_name, file_path in sorted(classmap.items(), key=lambda x: x[0].lower()):
+                    # Escape single quotes in class name and file path
+                    escaped_class = class_name.replace("'", "\\'").lower()
+                    escaped_path = file_path.replace("'", "\\'")
+                    src_prepare += f"\techo \"    '{escaped_class}' => '{escaped_path}',\" >> autoload.php\n"
+
+                src_prepare += '\techo "), __DIR__);" >> autoload.php\n'
+            else:
+                logger.warning("No classes found in classmap directories")
+
+        # Add dependency autoloads for non-PSR-4 packages
+        dependency_autoloads = self.get_src_dependency_autoloads()
+        if dependency_autoloads:
+            src_prepare += "\n" + dependency_autoloads
 
         return src_prepare
 
@@ -691,13 +952,22 @@ class ComposerPackage:
         """
         logger.debug("Generating src_prepare section")
 
-        # Get src_prepare for the package
-        if get_package_name(self.name) == "composer":
-            src_prepare, _ = self._handle_composer_package()
-        elif self.autoload["type"] == "psr-4":
-            src_prepare = self._handle_psr4_package()
-        else:
-            src_prepare = self._handle_other_package()
+        # Check for custom handler
+        handler = self._handler_registry.get_handler(self.name)
+        if handler:
+            custom_prepare = handler.get_src_prepare(self)
+            if custom_prepare is not None:
+                src_prepare = custom_prepare
+                # Add autoload files if present
+                if self.autoload["files"]:
+                    logger.debug("Adding files from autoload to manual autoload.php")
+                    for file in self.autoload["files"]:
+                        src_prepare += f'\n\techo "require_once __DIR__ . \\"/{file}\\";"'
+                        src_prepare += " >> autoload.php\n"
+                return src_prepare
+
+        # Default handling for packages without custom handlers
+        src_prepare = self._handle_psr4_package() if self.autoload["type"] == "psr-4" else self._handle_other_package()
 
         if self.autoload["files"]:
             logger.debug("Adding files from autoload to manual autoload.php")
@@ -706,6 +976,54 @@ class ComposerPackage:
                 src_prepare += " >> autoload.php\n"
 
         return src_prepare
+
+    def _get_psr4_install_items(self) -> list[str]:
+        """
+        Build the list of directories and files to install for PSR-4 packages.
+
+        For PSR-4 packages, install only the top-level base directories (like "src", "lib")
+        to preserve the directory structure for static references.
+
+        Returns:
+            List of directories and files to be passed to doins -r.
+
+        """
+        logger.debug("Building PSR-4 install items")
+        items: list[str] = []
+
+        # Get the top-level base directories from PSR-4 mapping
+        base_dirs = self._get_psr4_base_directories()
+
+        if base_dirs:
+            # Add each top-level base directory
+            for base_dir in base_dirs:
+                base_path = Path(self.temp_install_dir) / base_dir
+                if base_path.is_dir():
+                    items.append(base_dir)
+                    logger.debug("Including PSR-4 base directory: %s", base_dir)
+                else:
+                    logger.debug("PSR-4 base directory %s does not exist in %s", base_dir, self.temp_install_dir)
+        else:
+            # When base_dir is ".", we need to include all PHP files and directories
+            logger.debug("PSR-4 base directory is '.', including all content")
+            for item_path in Path(self.temp_install_dir).iterdir():
+                # Skip hidden items and bin directory
+                if item_path.name.startswith(".") or item_path.name == "bin":
+                    continue
+                if item_path.is_dir() or item_path.name.endswith(".php"):
+                    items.append(item_path.name)
+
+        # Check for additional common directories that might not be in the PSR-4 mapping
+        extra_dirs = ["res", "Resources", "config"]
+        for directory in extra_dirs:
+            dir_path = Path(self.temp_install_dir) / directory
+            if dir_path.is_dir() and directory not in items:
+                logger.debug("Including additional directory for install: %s", directory)
+                items.append(directory)
+
+        items.append("autoload.php")
+        logger.debug("Final PSR-4 install items: %s", items)
+        return items
 
     def _get_src_install(self) -> str:
         """
@@ -717,18 +1035,26 @@ class ComposerPackage:
         """
         logger.debug("Generating src_install section")
 
-        # For composer package, return the special src_install section
-        if get_package_name(self.name) == "composer":
-            _, src_install = self._handle_composer_package()
-            return src_install
+        # Check for custom handler
+        handler = self._handler_registry.get_handler(self.name)
+        if handler:
+            custom_install = handler.get_src_install(self)
+            if custom_install is not None:
+                return custom_install
 
-        # For regular packages, generate the standard src_install section
-        doins_content = f"doins -r {self._get_doins()}"
-        dobins_content = self._get_dobins()
+        # Default handling for packages without custom handlers
+        if self.autoload["type"] == "psr-4":
+            install_items = self._get_psr4_install_items()
+            doins_content = f'doins -r {" ".join(install_items)} || die'
+        else:
+            doins_content = f"doins -r {self._get_doins()}"
 
         src_install = f'insinto "{self.install_path}"\n\t{doins_content}'
-        if dobins_content:
-            src_install += f"\n\n\t{dobins_content}"
+
+        # Handle bin files by installing them to the package directory and symlinking
+        if self.bin_files:
+            bin_install = self._get_bin_install()
+            src_install += f"\n\n{bin_install}"
 
         return src_install
 
@@ -739,7 +1065,7 @@ class ComposerPackage:
 
         Args:
             templates_dir: Directory containing the templates
-            package_name: Name of the package to check for patches
+            package_name: Standardized package name from get_package_name()
 
         Returns:
             String containing the PATCHES section or an empty string if no patches found
@@ -767,6 +1093,30 @@ class ComposerPackage:
         patches_string += ")\n"
         return patches_string
 
+    def _get_bdepend_string(self) -> str:
+        """
+        Generate the BDEPEND section for the ebuild.
+
+        For PSR-4 packages and composer: Include dev-php/theseer-autoload
+        For other packages: No BDEPEND needed
+
+        Returns:
+            String containing the BDEPEND section
+
+        """
+        logger.debug("Generating BDEPEND section for %s", self.name)
+
+        if self.autoload["type"] == "psr-4" or get_package_name(self.name) == "composer":
+            # For PSR-4 packages and composer, add theseer-autoload as BDEPEND
+            bdepend = 'BDEPEND="dev-php/theseer-autoload"'
+            logger.debug("Added theseer-autoload as BDEPEND for PSR-4 package or composer")
+        else:
+            # For non-PSR-4 packages, no BDEPEND needed
+            bdepend = ""
+            logger.debug("No BDEPEND needed for non-PSR-4 package")
+
+        return bdepend
+
     def _get_doins(self) -> str:
         """
         Get doins based on the autoload information and directory structure.
@@ -784,10 +1134,10 @@ class ComposerPackage:
         self._process_autoload_files(doins, php_files)
         self._process_root_directory(doins, php_files)
 
-        # Add autoload.php if it's a PSR-4 package
-        if self.autoload["type"] == "psr-4":
+        # Add autoload.php for non-PSR-4 packages (it's generated in src_prepare)
+        if self.autoload["type"] != "psr-4":
             php_files.add("autoload.php")
-            logger.debug("Added autoload.php for PSR-4 package")
+            logger.debug("Added autoload.php for non-PSR-4 package")
 
         # Replace individual PHP files with *.php if there are any
         if php_files:
@@ -801,68 +1151,36 @@ class ComposerPackage:
 
         return result
 
-    def _get_dobins(self) -> str:
+    def _get_bin_install(self) -> str:
         """
-        Generate the dobins section for the ebuild based on bin files in composer.json.
+        Generate the bin installation section for the ebuild.
+
+        Installs bin files to the package directory and creates symlinks in /usr/bin.
 
         Returns:
-            The dobins section as a string
+            The bin installation section as a string
 
         """
-        logger.debug("Generating dobins section")
+        logger.debug("Generating bin installation section")
 
         if not self.bin_files:
             logger.debug("No bin files found")
             return ""
-        dobins_content = [f'exeinto "{self.install_path}/bin"']
 
-        # Add doexe lines for each binary file
+        bin_install = f'\tinsinto "{self.install_path}"\n'
+        bin_install += "\tdoins -r bin\n"
+
+        # Create symlinks for each bin file
         for bin_file in self.bin_files:
-            dobins_content.append(f'doexe "{bin_file}"')
+            # Extract just the filename from the path (e.g., "bin/composer" -> "composer")
+            bin_name = Path(bin_file).name
+            logger.debug("Symlinking to %s in %s", bin_name, self.install_path)
+            bin_install += f'\tfperms +x "{self.install_path}/{bin_file}"\n\n'
+            bin_install += f'\tdosym "{self.install_path}/{bin_file}" "/usr/bin/{bin_name}"'
+            if bin_file != self.bin_files[-1]:
+                bin_install += "\n"
 
-            # Extract the filename from the path
-            bin_filename = Path(bin_file).name
-
-            # Add dosym line for each binary file
-            dobins_content.append(f'dosym "{self.install_path}/bin/{bin_filename}" "/usr/bin/{bin_filename}"')
-
-        # Join all lines with newline and tab
-        return "\n\t".join(dobins_content)
-
-    def _get_src_dependency_autoloads(self, autoload_file: str = "autoload.php") -> str | None:
-        """
-        Get the dependency_autoload section for src_prepare.
-
-        Args:
-            autoload_file: The name of the autoload file to modify
-
-        Returns:
-            String containing dependency autoload information or None if no dependencies
-
-        """
-        # Collect dependency autoloads first
-        dependency_autoloads = []
-        for dep_info in self.dependencies.values():
-            if "instance" in dep_info and hasattr(dep_info["instance"], "install_path"):
-                install_path = dep_info["instance"].install_path
-                dependency_autoloads.append(
-                    f"\"${{VENDOR_DIR}}{install_path.replace('/usr/share/php', '')}/autoload.php\"",
-                )
-
-        # We have no dependencies
-        if not dependency_autoloads:
-            return None
-
-        # Build the dependency string
-        dependencies = '\n\tVENDOR_DIR="${EPREFIX}/usr/share/php"'
-        dependencies += f'\n\tcat >> {autoload_file} <<EOF || die "failed to extend autoload.php"'
-        dependencies += "\n\n// Dependencies"
-        dependencies += "\n\\Fedora\\Autoloader\\Dependencies::required(["
-        dependencies += '\n\t"${VENDOR_DIR}/Fedora/Autoloader/autoload.php",\n\t'
-        dependencies += ",\n\t".join(dependency_autoloads)
-        dependencies += "\n]);"
-        dependencies += "\nEOF"
-        return dependencies
+        return bin_install
 
     def _set_workdir(self) -> None:
         """
@@ -898,22 +1216,22 @@ class ComposerPackage:
         logger.debug("Package working directory: %s", self.work_dir)
 
     def _set_install_path(self) -> None:
-        """Set the installation path based on the autoload information."""
+        """Set the installation path based on the package name."""
         logger.debug("Setting package install path")
-        if self.autoload["type"] == "psr-4":
-            logger.debug("Package uses PSR-4 layout")
-            namespace = self.autoload["namespace"]
-            self.install_path = str(Path("/usr/share/php") / namespace.replace("\\", "/").rstrip("/"))
-            logger.debug("Install path: %s", self.install_path)
-            return
-        logger.warning("Package %s does not use PSR-4 autoloading", self.name)
+
+        # Parse the package name
         vendor, package = self.name.split("/")
-        if vendor.lower() == "symfony":
-            self.install_path = f"/usr/share/php/Symfony/Component/{package.title().replace('-', '')}"
-            logger.debug("Symfony package detected. Install path: %s", self.install_path)
-            return
-        self.install_path = f"/usr/share/php/{get_package_name(self.name).capitalize()}"
-        logger.debug("Non-PSR-4 package. Install path: %s", self.install_path)
+
+        # Convert vendor to title case
+        vendor_segment = vendor.capitalize()
+
+        # Convert package name: split by hyphens, capitalize each part, and join with /
+        package_parts = package.split("-")
+        package_segments = [part.capitalize() for part in package_parts]
+        package_segment = "-".join(package_segments)
+
+        self.install_path = str(Path("/usr/share/php") / vendor_segment / package_segment)
+        logger.debug("Install path: %s", self.install_path)
 
     def _set_github_repo(self) -> None:
         """
