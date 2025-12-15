@@ -28,8 +28,9 @@ dev = [
 [project.scripts]
 composer-ebuild = "composer_ebuild.cli:main"
 
-[tool.setuptools]
-packages = ["composer_ebuild"]
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["composer_ebuild*"]
 
 [tool.ruff]
 line-length = 120

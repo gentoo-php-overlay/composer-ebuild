@@ -104,23 +104,33 @@ def filter_subdirectories(doins_set: set[str]) -> set[str]:
     """
     Filter out subdirectories if the base directory is already in the set.
 
+    Also filter out wildcarded versions (e.g., "src/*") if the base directory exists.
+
     Args:
         doins_set: Set of directories and files to filter
 
     Returns:
-        Filtered set with subdirectories removed
+        Filtered set with subdirectories and wildcarded duplicates removed
 
     """
     logger.debug("Filtering subdirectories from doins set")
     filtered_set = set()
 
     for item in doins_set:
+        # Remove wildcard suffix if present for comparison
+        item_without_wildcard = item.rstrip("/*")
+
+        # Check if this is a wildcarded version and the base directory exists
+        if item.endswith("/*") and item_without_wildcard in doins_set:
+            logger.debug("Skipping wildcarded version %s as base directory %s exists", item, item_without_wildcard)
+            continue
+
         # Check if any base directory of this item is already in the list
-        parts = item.split("/")
+        parts = item_without_wildcard.split("/")
         is_subdirectory = False
         for i in range(1, len(parts)):
             base_dir = "/".join(parts[:i])
-            if base_dir in doins_set:
+            if base_dir in doins_set or f"{base_dir}/*" in doins_set:
                 logger.debug("Skipping %s as base directory %s is already included", item, base_dir)
                 is_subdirectory = True
                 break

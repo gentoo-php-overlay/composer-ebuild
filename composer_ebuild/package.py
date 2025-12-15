@@ -43,6 +43,12 @@ EAPI_VERSION: int = 8
 HTTP_FORBIDDEN: int = 403
 MIN_NAMESPACE_PARTS: int = 2
 
+# Virtual packages provided by Composer runtime, not installable
+COMPOSER_VIRTUAL_PACKAGES = {
+    "composer-runtime-api",
+    "composer-plugin-api",
+}
+
 logger = logging.getLogger(__name__)
 
 
@@ -69,6 +75,7 @@ class ComposerPackage:
     github_token: str | None
     install_path: str
     licenses: list[str]
+    lock_name: str
     name: str
     output_dir: str | None
     php_min_version: str
@@ -84,7 +91,7 @@ class ComposerPackage:
 
     def __init__(
         self,
-        name: str,
+        lock_name: str,
         version: str,
         temp_dir: str,
         config: PackageConfig | None = None,
@@ -93,7 +100,7 @@ class ComposerPackage:
         Initialize the ComposerPackage.
 
         Args:
-            name: The name of the Composer package
+            lock_name: The name of the package as it appears in composer.lock (may be an alias)
             version: The version of the Composer package
             temp_dir: The temporary directory where the Composer package is installed
             config: Optional configuration object with github_token and cache_dir
@@ -109,14 +116,14 @@ class ComposerPackage:
         self.github_tag: str | None = None
         self.github_token: str | None = config.github_token
         self.licenses: list[str] = []
-        self.name = name
+        self.lock_name = lock_name
         self.php_min_version: str = DEFAULT_PHP_MIN_VERSION
         self.repository_url: str | None = None
         self.requires: dict[str, str] = {}
         self.sha: str | None = None
         self.src_uri: str | None = None
         self.temp_dir: str = temp_dir
-        self.temp_install_dir: str = str(Path(temp_dir) / "vendor" / name.replace("/", os.sep))
+        self.temp_install_dir: str = str(Path(temp_dir) / "vendor" / lock_name.replace("/", os.sep))
         self.upstream_base_dir: str = ""
         self.version: str = re.sub(r"^v", "", version)
         self._handler_registry = HandlerRegistry()
@@ -201,12 +208,18 @@ class ComposerPackage:
             .replace("{{src_uri}}", src_uri + " -> ${P}.tar.gz")
             .replace("{{license}}", " ".join(self.licenses).strip() or "Unknown")
             .replace("{{rdepend}}", "\t" + rdepend_string)
-            .replace("{{bdepend}}", bdepend_string)
             .replace("{{patches}}", patches_string)
             .replace("{{src_prepare}}", "\t" + self._get_src_prepare())
             .replace("{{src_install}}", "\t" + self._get_src_install())
             .replace("{{workdir}}", self.work_dir)
         )
+
+        # Handle BDEPEND replacement - remove the line entirely if empty
+        if bdepend_string:
+            ebuild_content = ebuild_content.replace("{{bdepend}}", bdepend_string)
+        else:
+            # Remove the entire line containing {{bdepend}}
+            ebuild_content = re.sub(r"^.*\{\{bdepend\}\}.*\n", "", ebuild_content, flags=re.MULTILINE)
 
         ebuild_filename = f"{package_name}-{self.version.lstrip('v')}.ebuild"
         package_dir = Path(f"{self.output_dir}/{get_package_dir(package_name)}")
@@ -327,10 +340,10 @@ class ComposerPackage:
                 composer_json_info = json.load(composer_json_file)
             logger.debug("Successfully loaded composer.json")
         except FileNotFoundError as e:
-            error_msg = f"composer.json not found for {self.name}"
+            error_msg = f"composer.json not found for {self.lock_name}"
             raise ComposerJsonError(error_msg) from e
         except json.JSONDecodeError as e:
-            error_msg = f"Failed to parse composer.json for {self.name}"
+            error_msg = f"Failed to parse composer.json for {self.lock_name}"
             raise ComposerJsonError(error_msg) from e
         else:
             return composer_json_info
@@ -346,19 +359,19 @@ class ComposerPackage:
             ComposerJsonError: If the command fails or the output cannot be parsed
 
         """
-        logger.debug("Running composer show command for %s", self.name)
+        logger.debug("Running composer show command for %s", self.lock_name)
         try:
-            command = ["/usr/bin/composer", "show", self.name, "--format=json"]
+            command = ["/usr/bin/composer", "show", self.lock_name, "--format=json"]
             logger.debug("Running command in directory %s: %s", self.temp_dir, " ".join(command))
             _, stdout, _stderr = run_subprocess(command, cwd=self.temp_dir, capture_output=True, check=True)
             composer_show_info = json.loads(stdout)
             logger.debug("Successfully loaded composer show information")
         except subprocess.CalledProcessError as e:
-            error_msg = (f"Failed to run composer show command for {self.name}: {e}\n"
+            error_msg = (f"Failed to run composer show command for {self.lock_name}: {e}\n"
                          f"Command output: {e.stderr if hasattr(e, 'stderr') else ''}")
             raise ComposerJsonError(error_msg) from e
         except json.JSONDecodeError as e:
-            error_msg = f"Failed to parse composer show output for {self.name}: {e}"
+            error_msg = f"Failed to parse composer show output for {self.lock_name}: {e}"
             raise ComposerJsonError(error_msg) from e
         else:
             return composer_show_info
@@ -376,6 +389,11 @@ class ComposerPackage:
         """
         composer_json_info = self._load_composer_json()
         logger.debug("Loaded composer.json information: %s", composer_json_info)
+
+        # Get the actual package name from composer.json
+        self.name = composer_json_info.get("name", self.lock_name)
+        if self.name != self.lock_name:
+            logger.debug("Package has actual name %s (lock name: %s)", self.name, self.lock_name)
 
         composer_show_info = self._load_composer_show()
         logger.debug("Loaded composer show information: %s", composer_show_info)
@@ -695,11 +713,17 @@ class ComposerPackage:
         """
         Process regular package dependencies.
 
-        Adds non-PHP dependencies to the dependencies dictionary.
+        Adds non-PHP dependencies to the dependencies dictionary, excluding virtual packages.
         """
         for dep, _version_req in sorted(self.requires.items()):
-            if dep.lower() != "php" and not dep.lower().startswith("ext-"):
+            # Skip PHP, extensions, and virtual packages
+            if (dep.lower() != "php"
+                and not dep.lower().startswith("ext-")
+                and dep not in COMPOSER_VIRTUAL_PACKAGES):
                 self.dependencies[dep] = {"ebuild": get_package_dir(dep), "type": "main"}
+                logger.debug("Added package dependency: %s", dep)
+            elif dep in COMPOSER_VIRTUAL_PACKAGES:
+                logger.debug("Skipping virtual package dependency: %s", dep)
 
     def _process_main_dependencies(self) -> None:
         """

@@ -21,6 +21,12 @@ logger = logging.getLogger(__name__)
 DEFAULT_TEMP_DIR = str(Path(tempfile.gettempdir()) / "composer-ebuild")
 PLATFORM = "8.1"
 
+# Virtual packages provided by Composer runtime, not installable
+COMPOSER_VIRTUAL_PACKAGES = {
+    "composer-runtime-api",
+    "composer-plugin-api",
+}
+
 
 @dataclass
 class GeneratorConfig:
@@ -210,11 +216,48 @@ class ComposerEbuildGenerator:
             logger.error(error_message)
             raise ComposerPackageInstallError(error_message)
 
+    def _get_actual_package_name(self, lock_name: str) -> str:
+        """
+        Get the actual package name from the package's composer.json.
+
+        This handles package aliases where the name in composer.lock might differ
+        from the canonical name in the package's own composer.json.
+
+        Args:
+            lock_name: The package name as it appears in composer.lock
+
+        Returns:
+            The actual package name from the package's composer.json, or lock_name if not found
+
+        """
+        logger.debug("Getting actual package name for %s", lock_name)
+        package_composer_json = Path(self.temp_dir) / "vendor" / lock_name.replace("/", os.sep) / "composer.json"
+
+        if not package_composer_json.exists():
+            logger.warning("composer.json not found for %s at %s", lock_name, package_composer_json)
+            return lock_name
+
+        try:
+            with package_composer_json.open() as f:
+                package_data = json.load(f)
+                actual_name = package_data.get("name", lock_name)
+
+            if actual_name != lock_name:
+                logger.debug("Package %s has actual name %s in composer.json", lock_name, actual_name)
+            else:
+                logger.debug("Package %s name matches in composer.json", lock_name)
+
+            return actual_name
+        except (json.JSONDecodeError, OSError) as e:
+            logger.warning("Failed to read composer.json for %s: %s", lock_name, e)
+            return lock_name
+
     def _gather_package_information(self) -> None:
         """
         Gather information about every Composer package installed.
 
-        Use composer.lock as it returns the exact version.
+        Use composer.lock as it returns the exact version, but read the actual
+        package name from each package's composer.json to handle aliases.
         """
         logger.debug("Gathering information about installed Composer packages")
         composer_lock_path = Path(self.temp_dir) / "composer.lock"
@@ -233,23 +276,28 @@ class ComposerEbuildGenerator:
         )
 
         for package in composer_lock_data.get("packages", []):
-            name = package["name"]
+            lock_name = package["name"]
             version = package["version"]
-            if name != "composer":
-                logger.debug("Gathering information for %s", name)
+
+            # Get the actual package name from the package's composer.json
+            actual_name = self._get_actual_package_name(lock_name)
+
+            if actual_name != "composer":
+                logger.debug("Gathering information for %s (lock name: %s)", actual_name, lock_name)
                 try:
                     composer_package = ComposerPackage(
-                        name,
+                        lock_name,
                         version,
                         self.temp_dir,
                         config=package_config,
                     )
-                    self.packages[name] = composer_package
+                    # Store using the actual name to prevent duplicates from aliases
+                    self.packages[actual_name] = composer_package
                 except ComposerJsonError as e:
-                    logger.warning("Failed to create ComposerPackage for %s: %s", name, str(e))
+                    logger.warning("Failed to create ComposerPackage for %s: %s", actual_name, str(e))
                     # Create a minimal ComposerPackage object with available information
-                    self.packages[name] = ComposerPackage(
-                        name,
+                    self.packages[actual_name] = ComposerPackage(
+                        lock_name,
                         version,
                         self.temp_dir,
                         config=package_config,
@@ -306,6 +354,52 @@ class ComposerEbuildGenerator:
             logger.debug("Processing dependencies for %s", package_name)
             self._process_dependencies(package)
 
+    def _get_all_locked_packages(self) -> list[dict]:
+        """
+        Get all packages from composer.lock.
+
+        Returns:
+            List of all packages (both regular and dev) from composer.lock
+
+        """
+        composer_lock_path = Path(self.temp_dir) / "composer.lock"
+        if not composer_lock_path.exists():
+            logger.debug("composer.lock not found")
+            return []
+
+        with composer_lock_path.open() as f:
+            composer_lock_data = json.load(f)
+
+        return composer_lock_data.get("packages", []) + composer_lock_data.get("packages-dev", [])
+
+    def _is_virtual_package(self, package_name: str) -> bool:
+        """
+        Check if a package is virtual (not installable).
+
+        First checks against known virtual packages, then falls back to checking composer.lock.
+
+        Args:
+            package_name: Name of the package to check
+
+        Returns:
+            True if the package is virtual, False otherwise
+
+        """
+        # Check known virtual packages first
+        if package_name in COMPOSER_VIRTUAL_PACKAGES:
+            logger.debug("Package %s is a known virtual package", package_name)
+            return True
+
+        # Fall back to checking if package exists in composer.lock
+        all_packages = self._get_all_locked_packages()
+        package_names = [pkg["name"] for pkg in all_packages]
+        is_virtual = package_name not in package_names
+
+        if is_virtual:
+            logger.debug("Package %s not found in composer.lock, treating as virtual", package_name)
+
+        return is_virtual
+
     def _assign_package_dependencies(
         self,
         package: ComposerPackage,
@@ -332,7 +426,7 @@ class ComposerEbuildGenerator:
                 # Process sub-dependencies
                 if "requires" in dep:
                     self._assign_package_dependencies(package, dep["requires"])
-            elif dep_name != "php" and not dep_name.startswith("ext-"):
+            elif dep_name != "php" and not dep_name.startswith("ext-") and not self._is_virtual_package(dep_name):
                 logger.warning("Dependency %s not found in installed packages", dep_name)
 
     def _process_dependencies(self, package: ComposerPackage) -> None:
