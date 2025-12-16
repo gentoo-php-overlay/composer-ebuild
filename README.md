@@ -15,7 +15,7 @@ This tool should work for a lot of packages. But it should be noted that Compose
 
 ## Requirements
 
-- Python 3.9 or higher
+- Python 3.11 or higher
 - Composer (PHP package manager)
 
 ## Installation
@@ -36,19 +36,26 @@ To generate an ebuild for a Composer package, use the following command:
 composer-ebuild <package_name> [options]
 ```
 
+### Arguments:
+
+| Argument | Description |
+|----------|-------------|
+| `package_name` | The name of the Composer package (vendor/package) |
+
 ### Options:
 
 | Option | Description |
 |--------|-------------|
+| `--cache-dir CACHE_DIR` | Directory to cache downloaded packages (mostly used during development) |
 | `-d, --debug` | Enable debug logging |
-| `--github-token` | GitHub API token for authentication (can also use GITHUB_TOKEN environment variable) |
+| `--github-token GITHUB_TOKEN` | GitHub API token for authentication (can also use GITHUB_TOKEN environment variable) |
 | `-k, --keywords` | Generate package.accept_keywords file for all packages |
 | `-m, --metadata` | Generate metadata.xml files for packages |
-| `-o, --output-dir` | Specify the output directory for generated ebuilds (default: current working directory) |
-| `-p, --platform` | Specify PHP platform version (default: 8.1, choices: 7.4, 8.0, 8.1, 8.2, 8.3, 8.4) |
+| `-o, --output-dir OUTPUT_DIR` | The directory to store the generated ebuild files (default: current working directory) |
+| `-p, --platform PLATFORM` | PHP platform version (default: 8.1, choices: 7.4, 8.0, 8.1, 8.2, 8.3, 8.4) |
 | `--skip-downgrade` | Skip downgrading dependencies to their lowest stable versions |
-| `-t, --temp-dir` | Override the temporary directory used during the process (default: /tmp/composer-ebuild) |
-| `-v, --version` | Specify a particular version to install (default: latest) |
+| `-t, --temp-dir TEMP_DIR` | Override the temporary directory used during the process (default: /tmp/composer-ebuild) |
+| `-v, --version VERSION` | Specific version to install (default: latest) |
 
 By default, the generator will install the lowest stable versions of all dependencies to ensure maximum compatibility. Use `--skip-downgrade` to keep the latest compatible versions instead.
 
@@ -61,7 +68,7 @@ The GitHub token can be provided in two ways:
 1. Via environment variable: `export GITHUB_TOKEN=your_token`
 2. Via command line argument: `--github-token your_token`
 
-### Example:
+### Examples:
 
 ```bash
 # Using environment variable
@@ -70,9 +77,31 @@ composer-ebuild symfony/console -o ./ebuilds
 
 # Or using command line argument
 composer-ebuild symfony/console -o ./ebuilds --github-token=your_github_token
-```
 
-This command will generate an ebuild for the `symfony/console` package, place it in the `./ebuilds` directory, and run in debug mode.
+# Generate with metadata.xml files
+composer-ebuild symfony/console -o ./ebuilds -m
+
+# Generate with package.accept_keywords file
+composer-ebuild symfony/console -o ./ebuilds -k
+
+# Install a specific version
+composer-ebuild symfony/console -v 5.4.0 -o ./ebuilds
+
+# Use a specific PHP platform version
+composer-ebuild symfony/console -p 8.2 -o ./ebuilds
+
+# Enable debug mode
+composer-ebuild symfony/console -o ./ebuilds -d
+
+# Skip downgrading dependencies
+composer-ebuild symfony/console -o ./ebuilds --skip-downgrade
+
+# Use a custom temporary directory
+composer-ebuild symfony/console -o ./ebuilds -t /var/tmp/composer-work
+
+# Cache downloaded packages for development
+composer-ebuild symfony/console -o ./ebuilds --cache-dir ~/.cache/composer-ebuild
+```
 
 ## Development
 
